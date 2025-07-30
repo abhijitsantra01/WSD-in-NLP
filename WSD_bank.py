@@ -1,104 +1,235 @@
-import torch
-from transformers import BertTokenizer, BertModel
-from sklearn.linear_model import LogisticRegression
+import nltk
+nltk.download('averaged_perceptron_tagger_eng')
+nltk.download('punkt_tab')
 import numpy as np
+from collections import defaultdict
+from nltk.corpus import wordnet as wn
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+import string
+import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import warnings
+warnings.filterwarnings('ignore')
 
-# Load BERT tokenizer and model
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-bert_model = BertModel.from_pretrained('bert-base-uncased')
+# Download required NLTK data
+nltk.download('punkt')
+nltk.download('wordnet')
+nltk.download('stopwords')
+nltk.download('averaged_perceptron_tagger')
+nltk.download('omw-1.4')
 
-# Training data
-sentences = [
-    "He deposited money in the bank.",                   
-    "She went to the bank to apply for a loan.",         
-    "The river overflowed near the bank.",              
-    "Children played by the river bank.",               
-    "There is a new bank opening in our town.",          
-    "Birds nested in the trees on the river bank.",     
+class WordSenseDisambiguator:
+    def __init__(self):
+        self.lemmatizer = WordNetLemmatizer()
+        self.stop_words = set(stopwords.words('english'))
+        self.vectorizer = TfidfVectorizer(max_features=10000, stop_words='english')
+        
+        # Ambiguous words to focus on
+        self.ambiguous_words = {
+            'bank', 'bark', 'bat', 'bear', 'bow', 'box', 'can', 'card', 'case', 'cast',
+            'chair', 'charge', 'check', 'club', 'coach', 'code', 'cold', 'cook', 'cool',
+            'course', 'court', 'cover', 'craft', 'crane', 'cross', 'crown', 'cut', 'deal',
+            'deck', 'dish', 'dock', 'draw', 'drill', 'drive', 'drop', 'duck', 'face',
+            'fair', 'fall', 'fan', 'fast', 'field', 'figure', 'file', 'fire', 'firm',
+            'fish', 'fit', 'fix', 'flat', 'flight', 'floor', 'fly', 'fold', 'foot',
+            'form', 'frame', 'free', 'game', 'glass', 'ground', 'hand', 'hard', 'head',
+            'heat', 'hit', 'hold', 'house', 'iron', 'job', 'judge', 'key', 'kind',
+            'land', 'last', 'lead', 'leaf', 'left', 'light', 'line', 'live', 'lock',
+            'long', 'lot', 'mail', 'make', 'man', 'mark', 'match', 'matter', 'may',
+            'mean', 'mine', 'miss', 'model', 'move', 'nail', 'name', 'net', 'note',
+            'order', 'pack', 'page', 'palm', 'paper', 'park', 'part', 'pass', 'patient',
+            'pick', 'picture', 'piece', 'pin', 'pitch', 'place', 'plan', 'plant', 'play',
+            'point', 'pool', 'post', 'pound', 'press', 'program', 'pupil', 'quarter',
+            'race', 'rail', 'range', 'rate', 'rest', 'right', 'ring', 'rock', 'roll',
+            'room', 'root', 'round', 'row', 'run', 'safe', 'sail', 'scale', 'school',
+            'score', 'seal', 'season', 'seat', 'second', 'sense', 'set', 'ship', 'shop',
+            'shot', 'show', 'side', 'sign', 'sink', 'site', 'slip', 'smoke', 'snap',
+            'sound', 'space', 'spare', 'spring', 'square', 'stage', 'stand', 'star',
+            'state', 'stick', 'still', 'stock', 'store', 'story', 'strike', 'string',
+            'suit', 'sum', 'switch', 'table', 'take', 'tape', 'task', 'team', 'term',
+            'test', 'tie', 'time', 'tip', 'top', 'track', 'train', 'trip', 'turn',
+            'type', 'walk', 'wall', 'watch', 'wave', 'way', 'well', 'wheel', 'will',
+            'wind', 'wing', 'work', 'yard', 'year'
+        }
+        
+        print("Word Sense Disambiguator initialized!")
+        print(f"Tracking {len(self.ambiguous_words)} ambiguous words")
 
-    ("The river overflowed near the bank."),
-    ("Children played by the river bank."),
-    ("Birds nested in trees on the river bank."),
-    ("The fisherman sat on the bank with his rod."),
-    ("He walked along the bank watching the water flow."),
-    ("The canoe drifted close to the bank."),
+    def preprocess_text(self, text):
+        """Clean and preprocess text"""
+        text = text.lower()
+        text = re.sub(r'[^\w\s]', ' ', text)
+        tokens = word_tokenize(text)
+        tokens = [token for token in tokens if token not in self.stop_words and len(token) > 2]
+        return tokens
 
-    "I took a loan from the bank.",                    
-    "She works at the central bank.",                  
-    "He picnicked near the river bank.",               
-    "The bank was eroded by the flood waters.",
+    def get_wordnet_pos(self, word):
+        """Get WordNet POS tag"""
+        tag = nltk.pos_tag([word])[0][1][0].upper()
+        tag_dict = {"J": wn.ADJ, "N": wn.NOUN, "V": wn.VERB, "R": wn.ADV}
+        return tag_dict.get(tag, wn.NOUN)
 
-    "He withdrew money from the bank.",
-    "The bank closed my credit card account.",
-    "She deposited her paycheck at the bank.",
-    "They opened a joint account at the bank.",
-    "The bank charged a late fee.",
-    "He went to the bank to apply for a mortgage.",
-    "I set up a new account with an online bank.",
-    "The bank approved my home loan.",
-    "There is an ATM near the bank.",
-    "She spoke with a bank advisor about retirement.",
-    "The bank was robbed early this morning.",
-    "He took a loan from a microfinance bank.",
-    "The bank offers student loan refinancing.",
-    "They visited the bank branch downtown.",
-    "Interest rates at that bank are too high.",
+    def get_context_vector(self, sentence, target_word):
+        """Create context vector from sentence excluding target word"""
+        tokens = self.preprocess_text(sentence)
+        context_words = [word for word in tokens if word != target_word.lower()]
+        return ' '.join(context_words)
 
-    # River bank
-    "They sat on the bank watching the river flow.",
-    "A beaver built a dam near the bank.",
-    "She slipped and fell on the muddy bank.",
-    "The boat gently hit the bank.",
-    "We camped overnight on the river bank.",
-    "Wildflowers grew along the bank.",
-    "He walked his dog beside the bank.",
-    "The fisherman cast his line from the bank.",
-    "Birds nested in the reeds by the bank.",
-    "The flood destroyed homes close to the bank.",
-    "Children played near the bank of the creek.",
-    "The bank was eroded by the heavy rains.",
-    "We watched ducks paddling close to the bank.",
-    "The hiker rested on the bank of the stream.",
-    "He tied the boat to a tree near the bank."
-]
-labels = [0, 0, 1, 1, 0,
-    1, 1, 1, 1, 1,
-    1, 1, 0, 0, 1, 
-    1,0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0,
+    def get_synset_definition_vector(self, synset):
+        """Get definition and examples as context for synset"""
+        definition = synset.definition()
+        examples = ' '.join(synset.examples())
+        return f"{definition} {examples}"
 
-    1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1]  # 0 = financial, 1 = river
+    def disambiguate_word(self, word, sentence):
+        """Disambiguate a single word in context"""
+        word_lower = word.lower()
+        
+        # Get synsets for the word
+        pos = self.get_wordnet_pos(word)
+        synsets = wn.synsets(word_lower, pos=pos)
+        
+        if not synsets:
+            return {
+                'word': word,
+                'best_sense': 'No synsets found',
+                'definition': 'Word not found in WordNet',
+                'confidence': 0.0
+            }
+        
+        if len(synsets) == 1:
+            synset = synsets[0]
+            return {
+                'word': word,
+                'best_sense': synset.name(),
+                'definition': synset.definition(),
+                'confidence': 1.0
+            }
+        
+        # Get context from sentence
+        context = self.get_context_vector(sentence, word)
+        
+        if not context.strip():
+            # No context available, return most common sense
+            synset = synsets[0]
+            return {
+                'word': word,
+                'best_sense': synset.name(),
+                'definition': synset.definition(),
+                'confidence': 0.5
+            }
+        
+        # Calculate similarity scores
+        synset_contexts = []
+        for synset in synsets:
+            synset_context = self.get_synset_definition_vector(synset)
+            synset_contexts.append(synset_context)
+        
+        # Add sentence context
+        all_contexts = [context] + synset_contexts
+        
+        try:
+            # Calculate TF-IDF vectors
+            tfidf_matrix = self.vectorizer.fit_transform(all_contexts)
+            
+            # Calculate cosine similarity between context and each synset
+            context_vector = tfidf_matrix[0:1]
+            synset_vectors = tfidf_matrix[1:]
+            
+            similarities = cosine_similarity(context_vector, synset_vectors)[0]
+            
+            # Find best match
+            best_idx = np.argmax(similarities)
+            best_synset = synsets[best_idx]
+            confidence = float(similarities[best_idx])
+            
+            return {
+                'word': word,
+                'best_sense': best_synset.name(),
+                'definition': best_synset.definition(),
+                'confidence': confidence
+            }
+            
+        except Exception as e:
+            # Fallback to most common sense
+            synset = synsets[0]
+            return {
+                'word': word,
+                'best_sense': synset.name(),
+                'definition': synset.definition(),
+                'confidence': 0.3
+            }
 
-# Function to get BERT [CLS] token embedding
-def get_bert_embedding(text):
-    inputs = tokenizer(text, return_tensors='pt', truncation=True, padding=True)
-    with torch.no_grad():
-        outputs = bert_model(**inputs)
-    return outputs.last_hidden_state[:, 0, :].squeeze().numpy()
+    def process_sentence(self, sentence):
+        """Process entire sentence and disambiguate ambiguous words"""
+        tokens = word_tokenize(sentence)
+        results = []
+        
+        for token in tokens:
+            token_lower = token.lower()
+            # Only disambiguate if it's in our ambiguous words list
+            if token_lower in self.ambiguous_words:
+                result = self.disambiguate_word(token, sentence)
+                results.append(result)
+        
+        return results
 
-# Prepare training features
-X = [get_bert_embedding(s) for s in sentences]
+    def format_results(self, results):
+        """Format results for display"""
+        if not results:
+            return "No ambiguous words found in the sentence."
+        
+        formatted = "\nWord Sense Analysis:\n" + "="*40 + "\n"
+        
+        for i, result in enumerate(results, 1):
+            formatted += f"\n{i}. Word: '{result['word']}'\n"
+            formatted += f"   Best sense: {result['best_sense']}\n"
+            formatted += f"   Definition: {result['definition']}\n"
+            formatted += f"   Confidence: {result['confidence']:.3f}\n"
+            formatted += "-" * 30 + "\n"
+        
+        return formatted
 
-# Train the classifier
-clf = LogisticRegression(max_iter=1000)
-clf.fit(X, labels)
+class WSDChatBot:
+    def __init__(self):
+        self.disambiguator = WordSenseDisambiguator()
+        print("\nWord Sense Disambiguation ChatBot Ready!")
+        print("I can help disambiguate word meanings in your sentences.")
+        print("Type 'quit' to exit.\n")
 
-# Prediction function for new sentence
-def predict_bank_sense(sentence):
-    if "bank" not in sentence.lower():
-        return "Please include the word 'bank' in your sentence."
+    def chat(self):
+        while True:
+            try:
+                user_input = input("You: ").strip()
+                
+                if user_input.lower() in ['quit', 'exit', 'bye']:
+                    print("ChatBot: Goodbye! Thanks for using the chatbot!")
+                    break
+                
+                if not user_input:
+                    print("ChatBot: Please enter a sentence to analyze.")
+                    continue
+                
+                print("\nChatBot: Analyzing your sentence...\n")
+                
+                # Process the sentence
+                results = self.disambiguator.process_sentence(user_input)
+                
+                # Format and display results
+                response = self.disambiguator.format_results(results)
+                print("ChatBot:", response)
+                
+            except KeyboardInterrupt:
+                print("\n\nChatBot: Goodbye!")
+                break
+            except Exception as e:
+                print(f"ChatBot: Sorry, I encountered an error: {str(e)}")
 
-    vector = get_bert_embedding(sentence)
-    pred = clf.predict([vector])[0]
-    meaning = "river bank 🌊" if pred == 1 else "financial bank 🏦"
-    return f"Sentence: \"{sentence}\"\nPredicted sense of 'bank': {meaning}\n"
-
-
-while True:
-    user_input = input("Enter a sentence with the word 'bank' (or type 'exit' to quit):\n> ")
-    if user_input.lower() == "exit":
-        break
-    print(predict_bank_sense(user_input))
+# Main execution - directly start the chatbot
+if __name__ == "__main__":
+    print("Word Sense Disambiguation System")
+    chatbot = WSDChatBot()
+    chatbot.chat()
