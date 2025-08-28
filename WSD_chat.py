@@ -88,7 +88,6 @@ class WordSenseDisambiguator:
         """Disambiguate a single word in context"""
         word_lower = word.lower()
         
-        # Get synsets for the word
         pos = self.get_wordnet_pos(word)
         synsets = wn.synsets(word_lower, pos=pos)
         
@@ -109,11 +108,9 @@ class WordSenseDisambiguator:
                 'confidence': 1.0
             }
         
-        # Get context from sentence
         context = self.get_context_vector(sentence, word)
         
         if not context.strip():
-            # No context available, return most common sense
             synset = synsets[0]
             return {
                 'word': word,
@@ -121,27 +118,21 @@ class WordSenseDisambiguator:
                 'definition': synset.definition(),
                 'confidence': 0.5
             }
-        
-        # Calculate similarity scores
+
         synset_contexts = []
         for synset in synsets:
             synset_context = self.get_synset_definition_vector(synset)
             synset_contexts.append(synset_context)
-        
-        # Add sentence context
+
         all_contexts = [context] + synset_contexts
         
         try:
-            # Calculate TF-IDF vectors
             tfidf_matrix = self.vectorizer.fit_transform(all_contexts)
-            
-            # Calculate cosine similarity between context and each synset
             context_vector = tfidf_matrix[0:1]
             synset_vectors = tfidf_matrix[1:]
             
             similarities = cosine_similarity(context_vector, synset_vectors)[0]
-            
-            # Find best match
+
             best_idx = np.argmax(similarities)
             best_synset = synsets[best_idx]
             confidence = float(similarities[best_idx])
@@ -154,7 +145,6 @@ class WordSenseDisambiguator:
             }
             
         except Exception as e:
-            # Fallback to most common sense
             synset = synsets[0]
             return {
                 'word': word,
@@ -164,13 +154,11 @@ class WordSenseDisambiguator:
             }
 
     def process_sentence(self, sentence):
-        """Process entire sentence and disambiguate ambiguous words"""
         tokens = word_tokenize(sentence)
         results = []
         
         for token in tokens:
             token_lower = token.lower()
-            # Only disambiguate if it's in our ambiguous words list
             if token_lower in self.ambiguous_words:
                 result = self.disambiguate_word(token, sentence)
                 results.append(result)
@@ -178,7 +166,6 @@ class WordSenseDisambiguator:
         return results
 
     def format_results(self, results):
-        """Format results for display"""
         if not results:
             return "No ambiguous words found in the sentence."
         
@@ -228,7 +215,6 @@ class WSDChatBot:
             except Exception as e:
                 print(f"ChatBot: Sorry, I encountered an error: {str(e)}")
 
-# Main execution - directly start the chatbot
 if __name__ == "__main__":
     print("Word Sense Disambiguation System")
     chatbot = WSDChatBot()
